@@ -48,12 +48,19 @@ impl ThreadPool {
         if self.free_threads.len() == 0 {
             return Err("No free threads available!".to_string());
         }
-
+    
         let mut thread = self.free_threads.remove(0);
-        thread.allocation_state = Arc::new(Mutex::new(ThreadAllocationState::Allocated));
+        if let Ok(mut state) = thread.allocation_state.lock() {
+            *state = ThreadAllocationState::Allocated;
+        } else {
+            return Err("Could not lock allocation state for modification".to_string());
+        }
         self.allocated_threads.push(thread);
-
-        Ok(self.allocated_threads.last_mut().unwrap())
+    
+        match self.allocated_threads.last_mut() {
+            Some(allocated_thread) => return Ok(allocated_thread),
+            None => return Err("Error allocating thread!".to_string())
+        }
     }
 
     pub fn free_thread(&mut self, thread_id: ThreadID) -> Result<(), String> {
@@ -129,8 +136,8 @@ impl Thread {
         
             loop {
                 match terminate_flag_clone.lock() {
-                    Ok(guard) => {
-                        if *guard {
+                    Ok(terminate_flag) => {
+                        if *terminate_flag {
                             match rx_from_main.try_recv() {
                                 Ok(_) => {
                                     panic!("Thread was terminated but still received work!")
@@ -155,8 +162,11 @@ impl Thread {
                 match allocation_state_clone.lock() {
                     Ok(allocation_state) => {
                         if *allocation_state == ThreadAllocationState::Allocated {
+                            println!("Thread '{}' is allocated, waiting for work...", id.get_id());
                             match rx_from_main.recv() {
-                                Ok(_) => {},
+                                Ok(_) => {
+                                    println!("Thread '{}' received work!", id.get_id());
+                                },
                                 Err(err) => {
                                     println!("Error receiving from main thread: {}", err);
                                     continue;
@@ -172,8 +182,14 @@ impl Thread {
                     
                             let elapsed_time = start_time.elapsed();
                     
-                            if let Err(err) = tx_to_main.send((id.id, elapsed_time)) {
-                                println!("Error sending to main thread: {}", err);
+                            match tx_to_main.send((id.id, elapsed_time)) {
+                                Ok(_) => {
+                                    println!("Thread '{}' sent result!", id.get_id());
+                                },
+                                Err(err) => {
+                                    println!("Error sending to main thread: {}", err);
+                                    continue;
+                                }
                             }
                         }
                     },
@@ -201,22 +217,35 @@ impl Thread {
                 return Err("Thread has to be allocated to request work!".to_string());
             }
 
-            self.tx_to_worker.send(()).unwrap();
-    
-            Ok(())
+            match self.tx_to_worker.send(()) {
+                Ok(_) => return Ok(()),
+                Err(err) => return Err(format!("Error sending to worker thread: {}", err))
+            }
         } else {
             return Err("Error locking thread allocation state!".to_string());
         }
     }
 
     pub fn terminate(&mut self) -> Result<(), String> {
-        *self.terminate_flag.lock().unwrap() = true;
-        
-        if let Some(handle) = self.handle.take() {
-            handle.join().unwrap();
-        }
+        match self.terminate_flag.lock() {
+            Ok(mut terminate_flag) => {
+                if *terminate_flag {
+                    return Err("Thread is already terminated!".to_string());
+                }
 
-        Ok(())
+                *terminate_flag = true;
+        
+                if let Some(handle) = self.handle.take() {
+                    match handle.join() {
+                        Ok(_) => {},
+                        Err(err) => return Err(format!("Error joining thread: {:?}", err))
+                    }
+                }
+                
+                return Ok(())
+            },
+            Err(err) => return Err(format!("Error locking terminate flag: {}", err))
+        }
     }
 
     fn fibonacci(n: u32) -> u64 {
@@ -265,15 +294,34 @@ impl ThreadingTest2 {
         let mut sequential_time_average = Duration::from_secs(0);
         let total_start_time = Instant::now();
 
+        println!("Opening thread pool...");
         let mut thread_pool = ThreadPool::open();
+
+        println!("Allocating threads...");
         let thread_ids: Vec<ThreadID> = (0..NUM_THREADS).map(|_| thread_pool.allocate_thread().unwrap().id).collect();
 
-        for _ in 0..REQUEST_ITERATIONS {
+        for i in 0..REQUEST_ITERATIONS {
+            println!("Requesting works [Iteration {}]...", i);
             for thread_id in &thread_ids {
-                let thread = thread_pool.get_thread(thread_id).unwrap();
-                thread.request_work().unwrap();
+                println!("Requesting work for thread '{}'...", thread_id.id);
+                match thread_pool.get_thread_mut(thread_id) {
+                    Ok(thread) => {
+                        match thread.request_work() {
+                            Ok(_) => {
+                                println!("Requested work for thread '{}'...", thread_id.id);
+                            },
+                            Err(err) => {
+                                panic!("Error requesting work for thread: {}", err);
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        panic!("Error getting thread: {}", err);
+                    }
+                }
             }
     
+            println!("Receiving results [Iteration {}]...", i);
             for _ in &thread_ids {
                 let (thread_id, thread_elapsed_time) = thread_pool.rx_from_worker.recv().unwrap();
                 sequential_time_average += thread_elapsed_time.clone();
