@@ -1,6 +1,7 @@
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::*;
+use std::io::{self, Write};
 extern crate rand;
 use rand::Rng;
 
@@ -12,19 +13,22 @@ pub enum ThreadAllocationState {
 
 pub struct ThreadPool {
     free_threads: Vec<Thread>,
-    allocated_threads: Vec<Thread>
+    allocated_threads: Vec<Thread>,
+    rx_from_worker: mpsc::Receiver<(u32, Duration)>,
 }
 
 impl ThreadPool {
     pub fn open() -> Self {
         let mut free_threads = Vec::new();
+        let (tx_to_main, rx_from_worker) = mpsc::channel();
         for i in 0..NUM_THREADS {
-            free_threads.push(Thread::new(ThreadID::new(i)));
+            free_threads.push(Thread::new(ThreadID::new(i), tx_to_main.clone()));
         }
 
         Self {
             free_threads,
-            allocated_threads: Vec::new()
+            allocated_threads: Vec::new(),
+            rx_from_worker,
         }
     }
 
@@ -46,7 +50,7 @@ impl ThreadPool {
         }
 
         let mut thread = self.free_threads.remove(0);
-        thread.allocation_state = ThreadAllocationState::Allocated;
+        thread.allocation_state = Arc::new(Mutex::new(ThreadAllocationState::Allocated));
         self.allocated_threads.push(thread);
 
         Ok(self.allocated_threads.last_mut().unwrap())
@@ -61,12 +65,16 @@ impl ThreadPool {
     
         for (i, thread) in self.allocated_threads.iter_mut().enumerate() {
             if thread.id.get_id() == thread_id.get_id() {
-                if thread.allocation_state == ThreadAllocationState::Free {
-                    return Err("Thread has to be allocated to be freed!".to_string());
+                if let Ok(mut thread_allocation_state) = thread.allocation_state.lock() {
+                    if *thread_allocation_state == ThreadAllocationState::Free {
+                        return Err("Thread has to be currently allocated to be freed!".to_string());
+                    }
+                    *thread_allocation_state = ThreadAllocationState::Free;
+                    remove_index = Some(i);
+                    break;
+                } else {
+                    return Err("Error locking thread allocation state!".to_string());
                 }
-                thread.allocation_state = ThreadAllocationState::Free;
-                remove_index = Some(i);
-                break;
             }
         }
     
@@ -102,67 +110,103 @@ impl ThreadPool {
 
 pub struct Thread {
     id: ThreadID,
-    allocation_state: ThreadAllocationState,
+    allocation_state: Arc<Mutex<ThreadAllocationState>>,
     handle: Option<thread::JoinHandle<()>>,
     tx_to_worker: mpsc::Sender<()>,
-    rx_from_worker: mpsc::Receiver<()>,
     terminate_flag: Arc<Mutex<bool>>,
-    elapsed_time: Arc<Mutex<Duration>>,
 }
 
 impl Thread {
-    fn new(id: ThreadID) -> Self {
+    fn new(id: ThreadID, tx_to_main: mpsc::Sender<(u32, Duration)>) -> Self {
         let (tx_to_worker, rx_from_main) = mpsc::channel();
-        let (tx_to_main, rx_from_worker) = mpsc::channel();
         let terminate_flag = Arc::new(Mutex::new(false));
-        let flag = terminate_flag.clone();
-        let elapsed_time = Arc::new(Mutex::new(Duration::from_secs(0)));
-        let elapsed_time_clone = elapsed_time.clone();
+        let allocation_state = Arc::new(Mutex::new(ThreadAllocationState::Free));
+        let terminate_flag_clone = terminate_flag.clone();
+        let allocation_state_clone = allocation_state.clone();
 
         let handle = thread::spawn(move || {
             let mut rng = rand::thread_rng();
-            
+        
             loop {
-                {
-                    if *flag.lock().unwrap() {
-                        break;
+                match terminate_flag_clone.lock() {
+                    Ok(guard) => {
+                        if *guard {
+                            match rx_from_main.try_recv() {
+                                Ok(_) => {
+                                    panic!("Thread was terminated but still received work!")
+                                }
+                                Err(mpsc::TryRecvError::Empty) => {
+                                    println!("Thread '{}' was terminated with empty work queue.", id.get_id());
+                                    break;
+                                }
+                                Err(mpsc::TryRecvError::Disconnected) => {
+                                    println!("Thread '{}' was terminated with disconnected work queue.", id.get_id());
+                                    break;
+                                }
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        println!("Error locking terminate flag: {}", err);
+                        continue;
                     }
                 }
                 
-                let _ = rx_from_main.recv().unwrap();
-        
-                let start_time = Instant::now();
-                let random_times = rng.gen_range(1..=FIBONACCI_MAX_ITERATIONS);
-                for _ in 0..random_times {
-                    let _ = Self::fibonacci(FIBONACCI_LENGTH);
+                match allocation_state_clone.lock() {
+                    Ok(allocation_state) => {
+                        if *allocation_state == ThreadAllocationState::Allocated {
+                            match rx_from_main.recv() {
+                                Ok(_) => {},
+                                Err(err) => {
+                                    println!("Error receiving from main thread: {}", err);
+                                    continue;
+                                }
+                            }
+                    
+                            let start_time = Instant::now();
+                            let random_times = rng.gen_range(1..=FIBONACCI_MAX_ITERATIONS);
+                    
+                            for _ in 0..random_times {
+                                let _ = Self::fibonacci(FIBONACCI_LENGTH);
+                            }
+                    
+                            let elapsed_time = start_time.elapsed();
+                    
+                            if let Err(err) = tx_to_main.send((id.id, elapsed_time)) {
+                                println!("Error sending to main thread: {}", err);
+                            }
+                        }
+                    },
+                    Err(err) => {
+                        println!("Error locking thread allocation state: {}", err);
+                        continue;
+                    }
                 }
-                let elapsed_time = start_time.elapsed();
-                
-                *elapsed_time_clone.lock().unwrap() += elapsed_time;
-        
-                tx_to_main.send(()).unwrap();
             }
         });
+        
 
         Self {
             id,
-            allocation_state: ThreadAllocationState::Free,
+            allocation_state,
             handle: Some(handle),
             tx_to_worker,
-            rx_from_worker,
             terminate_flag,
-            elapsed_time
         }
     }
 
     pub fn request_work(&self) -> Result<(), String> {
-        if self.allocation_state == ThreadAllocationState::Free {
-            return Err("Thread has to be allocated to request work!".to_string());
+        if let Ok(allocation_state) = self.allocation_state.lock() {
+            if *allocation_state == ThreadAllocationState::Free {
+                return Err("Thread has to be allocated to request work!".to_string());
+            }
+
+            self.tx_to_worker.send(()).unwrap();
+    
+            Ok(())
+        } else {
+            return Err("Error locking thread allocation state!".to_string());
         }
-
-        self.tx_to_worker.send(()).unwrap();
-
-        Ok(())
     }
 
     pub fn terminate(&mut self) -> Result<(), String> {
@@ -210,48 +254,53 @@ impl ThreadID {
 }
 
 const REQUEST_ITERATIONS: u32 = 5;
-const NUM_THREADS: u32 = 32;
-const NUM_ALLOCATIONS: u32 = 32;
-const FIBONACCI_LENGTH: u32 = 64;
+const NUM_THREADS: u32 = 16;
+const FIBONACCI_LENGTH: u32 = 16;
 const FIBONACCI_MAX_ITERATIONS: u32 = 1000000;
 
 pub struct ThreadingTest2;
 
 impl ThreadingTest2 {
     pub fn main() {
+        let mut sequential_time_average = Duration::from_secs(0);
+        let total_start_time = Instant::now();
+
         let mut thread_pool = ThreadPool::open();
-        let thread_ids: Vec<ThreadID> = (0..NUM_ALLOCATIONS).map(|_| thread_pool.allocate_thread().unwrap().id).collect();
+        let thread_ids: Vec<ThreadID> = (0..NUM_THREADS).map(|_| thread_pool.allocate_thread().unwrap().id).collect();
 
         for _ in 0..REQUEST_ITERATIONS {
             for thread_id in &thread_ids {
                 let thread = thread_pool.get_thread(thread_id).unwrap();
-    
-                for _ in 0..REQUEST_ITERATIONS {
-                    thread.request_work().unwrap();
-                }
+                thread.request_work().unwrap();
             }
     
-            let start_time = Instant::now();
-            let mut elapsed_time_sequential = Duration::from_secs(0);
-    
-            for thread_id in &thread_ids {
-                let thread = thread_pool.get_thread_mut(thread_id).unwrap();
-                thread.rx_from_worker.recv().unwrap();
-                println!("Thread '{}'\t took {:?}", thread_id.id, thread.elapsed_time.lock().unwrap());
-                elapsed_time_sequential += *thread.elapsed_time.lock().unwrap();
+            for _ in &thread_ids {
+                let (thread_id, thread_elapsed_time) = thread_pool.rx_from_worker.recv().unwrap();
+                sequential_time_average += thread_elapsed_time.clone();
+                println!("Thread '{}'\t took {:?}", thread_id, thread_elapsed_time);
             }
-            let elapsed_time_parallel = start_time.elapsed();
-            let efficiency = elapsed_time_sequential.as_secs_f64() / elapsed_time_parallel.as_secs_f64();
-    
-            println!("Total time sequential: {:?}", elapsed_time_sequential);
-            println!("Total time parallel: {:?}", elapsed_time_parallel);
-            println!("Efficiency: {}\n\n\n", efficiency);
         }
 
+        println!("\n\nFreeing threads...");
         for thread_id in thread_ids {
-            thread_pool.free_thread(thread_id).unwrap();
+            thread_pool.free_thread(thread_id).unwrap_or_else(|err| panic!("Error freeing thread: {}", err));
         }
 
-        thread_pool.close().unwrap();
+        println!("Closing thread pool...");
+        thread_pool.close().unwrap_or_else(|err| panic!("Error closing thread pool: {}", err));
+
+        println!("1");
+        let total_sequential_time_estimation = sequential_time_average.clone();
+
+        println!("2");
+        sequential_time_average /= (REQUEST_ITERATIONS * NUM_THREADS) as u32;
+        
+        println!("3");
+        let total_elapsed_time = total_start_time.elapsed();
+
+        println!("\n\nSequential time average: \t{:?}", sequential_time_average);
+        println!("Total sequential time estimate: \t{:?}", total_sequential_time_estimation);
+        println!("Total elapsed time: \t\t\t{:?}", total_elapsed_time);
+        println!("Speedup: \t\t\t{:?}", total_sequential_time_estimation.as_secs_f64() / total_elapsed_time.as_secs_f64());
     }
 }
