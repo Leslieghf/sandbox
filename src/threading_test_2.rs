@@ -218,7 +218,10 @@ impl Thread {
             }
 
             match self.tx_to_worker.send(()) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    println!("For some reason after some time, this line is never reached.");
+                    return Ok(())
+                },
                 Err(err) => return Err(format!("Error sending to worker thread: {}", err))
             }
         } else {
