@@ -1,9 +1,11 @@
 use core::panic;
-use std::sync::mpsc::*;
+use std::time::Duration;
+use std::{sync::mpsc::*, thread};
 
 use futures::channel::mpsc::SendError;
 
 use super::thread::*;
+use super::task::*;
 
 pub enum NetworkingTaskInput {
     ConnectToServer(ConnectToServerTaskInput),
@@ -33,11 +35,12 @@ impl Task for ConnectToServerTask {
     type Input = ConnectToServerTaskInput;
     type Output = ConnectToServerTaskOutput;
 
-    fn new(input: ConnectToServerTaskInput) -> Result<Self, String> {
-        Ok(Self { input })
+    fn new(input: ConnectToServerTaskInput) -> Self{
+        Self { input }
     }
 
     fn execute(&mut self) -> Result<ConnectToServerTaskOutput, String> {
+        thread::sleep(Duration::from_secs(5));
         Ok(ConnectToServerTaskOutput)
     }
 }
@@ -47,6 +50,7 @@ pub struct NetworkingThread {
     request_receiver: Receiver<NetworkingThreadRequest>,
     result_sender: Sender<NetworkingThreadResult>,
     result_receiver: Receiver<NetworkingThreadResult>,
+    handle: thread::JoinHandle<()>,
 }
 
 impl NetworkingThread {
@@ -54,7 +58,7 @@ impl NetworkingThread {
         let (request_sender, request_receiver) = channel::<NetworkingThreadRequest>();
         let (result_sender, result_receiver) = channel::<NetworkingThreadResult>();
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             loop {
                 match request_receiver.recv() {
                     Ok(request) => match request {
@@ -71,7 +75,7 @@ impl NetworkingThread {
                             }
                         },
                         NetworkingThreadRequest::Task(task) => match task {
-                            NetworkingTaskRequest::ConnectToServer(task) => {
+                            NetworkingTask::ConnectToServer(task) => {
                                 let result = task.execute();
                                 match result_sender.send(NetworkingThreadResult::Task(NetworkingTaskOutput::ConnectToServer(result))) {
                                     Ok(_) => {}
@@ -88,11 +92,19 @@ impl NetworkingThread {
                 }
             }
         });
+
+        Self {
+            request_sender,
+            request_receiver,
+            result_sender,
+            result_receiver,
+            handle,
+        }
     }
 
-    fn send_task_request(&mut self, task: NetworkingTask) -> Result<(), SendError>
+    pub fn send_task_request(&mut self, task: NetworkingTask) -> Result<(), SendError>
     {
-        match self.request_sender.send(NetworkingThreadRequest::Task(NetworkingTask::ConnectToServer(task))) {
+        match self.request_sender.send(NetworkingThreadRequest::Task(task)) {
             Ok(_) => {
                 return Ok(());
             }
@@ -102,7 +114,7 @@ impl NetworkingThread {
         }
     }
 
-    fn receive_result(&mut self) -> Result<NetworkingThreadResult, RecvError>
+    pub fn receive_result(&mut self) -> Result<NetworkingThreadResult, RecvError>
     {
         match self.result_receiver.recv() {
             Ok(result) => {
@@ -122,7 +134,7 @@ impl Thread for NetworkingThread {
                 return Ok(());
             }
             Err(error) => {
-                return error;
+                return Err(error);
             }
         }
     }
@@ -130,10 +142,10 @@ impl Thread for NetworkingThread {
 
 pub enum NetworkingThreadRequest {
     Command(CommandRequest),
-    Task(NetworkingTaskRequest),
+    Task(NetworkingTask),
 }
 
 pub enum NetworkingThreadResult {
     Command(CommandResult),
-    Task(NetworkingTaskResult),
+    Task(NetworkingTaskOutput),
 }
