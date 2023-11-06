@@ -6,7 +6,7 @@
 
 // Internal imports
 use crate::math::*;
-use crate::chunking::cluster::*;
+use super::cluster::*;
 
 // External imports
 use num_bigint::BigUint;

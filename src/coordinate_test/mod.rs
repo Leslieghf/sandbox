@@ -1,7 +1,9 @@
 // Modules
+pub mod math;
 pub mod universe;
 
 // Local imports
+use math::*;
 use universe::*;
 
 // Internal imports
@@ -23,9 +25,14 @@ use universe::*;
 
 
 // Structs
-
+pub struct CoordinateTest;
 
 // Implementations
+impl CoordinateTest {
+    pub fn main() {
+        
+    }
+}
 
 
 // Module Functions

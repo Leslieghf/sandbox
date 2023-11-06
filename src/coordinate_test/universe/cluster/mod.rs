@@ -5,8 +5,9 @@
 
 
 // Internal imports
-use crate::math::*;
-use crate::chunking::chunk::*;
+use crate::base10x10_codec::*;
+use crate::base57_codec::*;
+use super::chunk::*;
 
 // External imports
 use num_bigint::BigUint;
