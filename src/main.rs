@@ -5,37 +5,46 @@ use example::*;
 use task::*;
 
 fn main() {
-    let mut task_manager: TaskManager<MyExampleTask> = TaskManager::new();
+    let mut task_api = TaskAPI::new();
 
-    task_manager.add_task(
+    task_api.register_task_type::<MyExampleTask>();
+
+    let my_example_task_manager = match task_api.get_task_manager::<MyExampleTask>() {
+        Ok(task_manager) => task_manager,
+        Err(error) => {
+            panic!("{}", error);
+        },
+    };
+
+    my_example_task_manager.add_task(
         Box::new(MyExampleTask::DoOperationA), 
-        Some(Box::new(|success| {
-            println!("Operation A succeeded: {:?}", success);
+        Some(Box::new(|_| {
+            println!("Operation A succeeded");
         })),
         Some(Box::new(|failure| {
-            println!("Operation A failed: {:?}", failure);
+            println!("Operation A failed: {}", failure);
         })),
     );
 
-    task_manager.add_task(
+    my_example_task_manager.add_task(
         Box::new(MyExampleTask::DoOperationB), 
-        Some(Box::new(|success| {
-            println!("Operation B succeeded: {:?}", success);
+        Some(Box::new(|_| {
+            println!("Operation B succeeded");
         })),
         Some(Box::new(|failure| {
-            println!("Operation B failed: {:?}", failure);
+            println!("Operation B failed: {}", failure);
         })),
     );
 
-    task_manager.add_task(
+    my_example_task_manager.add_task(
         Box::new(MyExampleTask::DoOperationC), 
-        Some(Box::new(|success| {
-            println!("Operation C succeeded: {:?}", success);
+        Some(Box::new(|_| {
+            println!("Operation C succeeded");
         })),
         Some(Box::new(|failure| {
-            println!("Operation C failed: {:?}", failure);
+            println!("Operation C failed: {}", failure);
         })),
     );
 
-    task_manager.execute_tasks();
+    my_example_task_manager.execute_tasks();
 }
