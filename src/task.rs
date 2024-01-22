@@ -7,6 +7,7 @@ pub trait Task: Any + Send + Sync {
     type FailureType: Any + Error + Send + Sync;
 
     fn execute(&self) -> Result<Self::SuccessType, Self::FailureType>;
+    fn get_id(&self) -> u64;
 }
 
 type SuccessCallback<ReturnType> = Box<dyn FnOnce(ReturnType) + Send + Sync>;
