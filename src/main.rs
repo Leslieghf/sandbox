@@ -1,50 +1,21 @@
-pub mod example;
-pub mod task;
+pub mod game;
 
-use example::*;
-use task::*;
+use game::*;
+
+use log::*;
 
 fn main() {
-    let mut task_api = TaskAPI::new();
-
-    task_api.register_task_type::<MyExampleTask>();
-
-    let my_example_task_manager = match task_api.get_task_manager::<MyExampleTask>() {
-        Ok(task_manager) => task_manager,
-        Err(error) => {
-            panic!("{}", error);
-        },
+    let game_manager = GAME_MANAGER.clone();
+    let mut game_manager = match game_manager.lock() {
+        Ok(game_manager) => game_manager,
+        Err(_) => panic!("Failed to lock game manager!"),
     };
 
-    my_example_task_manager.add_task(
-        Box::new(MyExampleTask::DoOperationA), 
-        Some(Box::new(|_| {
-            println!("Operation A succeeded");
-        })),
-        Some(Box::new(|failure| {
-            println!("Operation A failed: {}", failure);
-        })),
-    );
+    let mut game_handle = game_manager.create_game("your_mom".to_string());
+    let game = match game_handle.access(true) {
+        Ok(game) => game,
+        Err(_) => panic!("Failed to lock game!"),
+    };
 
-    my_example_task_manager.add_task(
-        Box::new(MyExampleTask::DoOperationB), 
-        Some(Box::new(|_| {
-            println!("Operation B succeeded");
-        })),
-        Some(Box::new(|failure| {
-            println!("Operation B failed: {}", failure);
-        })),
-    );
-
-    my_example_task_manager.add_task(
-        Box::new(MyExampleTask::DoOperationC), 
-        Some(Box::new(|_| {
-            println!("Operation C succeeded");
-        })),
-        Some(Box::new(|failure| {
-            println!("Operation C failed: {}", failure);
-        })),
-    );
-
-    my_example_task_manager.execute_tasks();
+    
 }
