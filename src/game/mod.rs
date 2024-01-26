@@ -491,11 +491,9 @@ impl GameModuleManager {
 	}
 
 	pub fn delete_game_module(&mut self, game_module_id: GameModuleID) -> Result<(), GameModuleManagerDeleteGameModuleError> {
-		if let Some(_) = self.registered_game_module_handles.remove(&game_module_id) {
-			self.recycle_used_game_module_id(game_module_id);
-			Ok(())
-		} else {
-			Err(GameModuleManagerDeleteGameModuleError::GameModuleDoesNotExist)
+		match self.unregister_game_module_handle(game_module_id) {
+			Ok(_) => Ok(()),
+			Err(_) => Err(GameModuleManagerDeleteGameModuleError::GameModuleDoesNotExist),
 		}
 	}
 }
