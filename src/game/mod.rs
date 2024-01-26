@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::any::*;
 use lazy_static::lazy_static;
 use log::*;
+use serde::*;
 
 pub type GameID = u64;
 
@@ -132,6 +133,15 @@ pub struct GameModuleInfo {
     game_module_id: GameModuleID,
 }
 
+impl Default for GameModuleInfo {
+	fn default() -> Self {
+		Self {
+			game_module_type_id: TypeId::of::<()>(),
+			game_module_id: 0,
+		}
+	}
+}
+
 impl GameModuleInfo {
     pub fn get_game_module_type_id(&self) -> GameModuleTypeID {
         self.game_module_type_id
@@ -140,10 +150,15 @@ impl GameModuleInfo {
     pub fn get_game_module_id(&self) -> GameModuleID {
         self.game_module_id
     }
+}
 
+pub trait GameModuleType {
+	type ConfigType: 'static + GameModuleConfig + Sync + Send + Serialize + for<'de> Deserialize<'de>;
+	type StateType: 'static + GameModuleState + Sync + Send + Serialize + for<'de> Deserialize<'de>;
 }
 
 pub trait GameModuleConfig {
+	fn default() -> Box<dyn GameModuleConfig + Sync + Send> where Self: Sized;
 	fn box_clone(&self) -> Box<dyn GameModuleConfig + Sync + Send>;
 	fn new_default_state(&self) -> Box<dyn GameModuleState + Sync + Send>;
 }
@@ -155,6 +170,7 @@ impl Clone for Box<dyn GameModuleConfig + Sync + Send> {
 }
 
 pub trait GameModuleState {
+	fn default() -> Box<dyn GameModuleState + Sync + Send> where Self: Sized;
 	fn box_clone(&self) -> Box<dyn GameModuleState + Sync + Send>;
 	fn new_default_config(&self) -> Box<dyn GameModuleConfig + Sync + Send>;
 }
@@ -163,6 +179,28 @@ impl Clone for Box<dyn GameModuleState + Sync + Send> {
 	fn clone(&self) -> Self {
 		self.box_clone()
 	}
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleLoadGameModuleConfigError {
+	GameModuleConfigAlreadyLoaded,
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleLoadGameModuleStateError {
+	GameModuleConfigStillUnloaded,
+	GameModuleStateAlreadyLoaded,
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleUnloadGameModuleConfigError {
+	GameModuleConfigAlreadyUnloaded,
+	GameModuleStateStillLoaded,
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleUnloadGameModuleStateError {
+	GameModuleStateAlreadyUnloaded,
 }
 
 pub enum GameModule {
@@ -181,6 +219,91 @@ pub enum GameModule {
 }
 
 impl GameModule {
+	fn new<T: 'static + GameModuleType>() -> GameModule {
+		let game_module_manager = GAME_MODULE_MANAGER.clone();
+		let mut game_module_manager = match game_module_manager.lock() {
+			Ok(game_module_manager) => game_module_manager,
+			Err(_) => panic!("Failed to lock game module manager!"),
+		};
+
+		GameModule::GameModuleInfoLoaded {
+			game_module_info: GameModuleInfo {
+				game_module_type_id: TypeId::of::<T>(),
+				game_module_id: game_module_manager.get_unused_game_module_id(),
+			},
+		}
+	}
+
+	pub fn load_game_module_config<T: 'static + GameModuleType>(&mut self, game_module_config: Box<T::ConfigType>) -> Result<(), GameModuleLoadGameModuleConfigError> {
+		match self {
+			GameModule::GameModuleInfoLoaded { game_module_info } => {
+				let game_module_info = std::mem::take(game_module_info);
+
+				*self = GameModule::GameModuleConfigLoaded {
+					game_module_info,
+					game_module_config,
+				};
+
+				Ok(())
+			},
+			GameModule::GameModuleConfigLoaded { .. } => Err(GameModuleLoadGameModuleConfigError::GameModuleConfigAlreadyLoaded),
+			GameModule::GameModuleStateLoaded { .. } => Err(GameModuleLoadGameModuleConfigError::GameModuleConfigAlreadyLoaded),
+		}
+	}
+
+	pub fn load_game_module_state<T: 'static + GameModuleType>(&mut self, game_module_state: Box<T::StateType>) -> Result<(), GameModuleLoadGameModuleStateError> {
+		match self {
+			GameModule::GameModuleInfoLoaded { .. } => Err(GameModuleLoadGameModuleStateError::GameModuleConfigStillUnloaded),
+			GameModule::GameModuleConfigLoaded { game_module_info, game_module_config } => {
+				let game_module_info = std::mem::take(game_module_info);
+				let game_module_config = std::mem::replace(game_module_config, T::ConfigType::default());
+
+				*self = GameModule::GameModuleStateLoaded {
+					game_module_info,
+					game_module_config,
+					game_module_state,
+				};
+
+				Ok(())
+			},
+			GameModule::GameModuleStateLoaded { .. } => Err(GameModuleLoadGameModuleStateError::GameModuleStateAlreadyLoaded),
+		}
+	}
+
+	pub fn unload_game_module_config<T: 'static + GameModuleType>(&mut self) -> Result<(), GameModuleUnloadGameModuleConfigError> {
+		match self {
+			GameModule::GameModuleInfoLoaded { .. } => Err(GameModuleUnloadGameModuleConfigError::GameModuleConfigAlreadyUnloaded),
+			GameModule::GameModuleConfigLoaded { game_module_info, .. } => {
+				let game_module_info = std::mem::take(game_module_info);
+
+				*self = GameModule::GameModuleInfoLoaded {
+					game_module_info,
+				};
+
+				Ok(())
+			},
+			GameModule::GameModuleStateLoaded { .. } => Err(GameModuleUnloadGameModuleConfigError::GameModuleStateStillLoaded),
+		}
+	}
+
+	pub fn unload_game_module_state<T: 'static + GameModuleType>(&mut self) -> Result<(), GameModuleUnloadGameModuleStateError> {
+		match self {
+			GameModule::GameModuleInfoLoaded { .. } => Err(GameModuleUnloadGameModuleStateError::GameModuleStateAlreadyUnloaded),
+			GameModule::GameModuleConfigLoaded { .. } => Err(GameModuleUnloadGameModuleStateError::GameModuleStateAlreadyUnloaded),
+			GameModule::GameModuleStateLoaded { game_module_info, game_module_config, .. } => {
+				let game_module_info = std::mem::take(game_module_info);
+				let game_module_config = std::mem::replace(game_module_config, T::ConfigType::default());
+
+				*self = GameModule::GameModuleConfigLoaded {
+					game_module_info,
+					game_module_config,
+				};
+
+				Ok(())
+			},
+		}
+	}
+
 	pub fn get_game_module_info(&self) -> &GameModuleInfo {
 		match self {
 			GameModule::GameModuleInfoLoaded { game_module_info } => game_module_info,
@@ -202,6 +325,177 @@ impl GameModule {
 			GameModule::GameModuleInfoLoaded { .. } => None,
 			GameModule::GameModuleConfigLoaded { .. } => None,
 			GameModule::GameModuleStateLoaded { game_module_state, .. } => Some(game_module_state),
+		}
+	}
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleHandleAccessError {
+	Locked,
+	Poisoned,
+}
+
+#[derive(Clone)]
+pub struct GameModuleHandle {
+	game_module: Arc<Mutex<GameModule>>
+}
+
+impl GameModuleHandle {
+	fn new(game_module: GameModule) -> GameModuleHandle {
+		GameModuleHandle {
+			game_module: Arc::new(Mutex::new(game_module)),
+		}
+	}
+
+	pub fn access(&mut self, wait_for_lock: bool) -> Result<MutexGuard<GameModule>, GameModuleHandleAccessError> {
+		if wait_for_lock {
+			match self.game_module.lock() {
+				Ok(guard) => Ok(guard),
+				Err(_) => Err(GameModuleHandleAccessError::Poisoned),
+			}
+		} else {
+			match self.game_module.try_lock() {
+				Ok(guard) => Ok(guard),
+				Err(err) => {
+					match err {
+						TryLockError::WouldBlock => Err(GameModuleHandleAccessError::Locked),
+						TryLockError::Poisoned(_) => Err(GameModuleHandleAccessError::Poisoned),
+					}
+				},
+			}
+		}
+	}
+}
+
+lazy_static!(
+	pub static ref GAME_MODULE_MANAGER: Arc<Mutex<GameModuleManager>> = Arc::new(Mutex::new(GameModuleManager::new()));
+);
+
+#[derive(Debug, Clone)]
+pub enum GameModuleManagerRegisterGameModuleHandleError {
+	GameModuleAlreadyRegistered,
+	MutexLocked,
+	MutexPoisoned,
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleManagerUnregisterGameModuleHandleError {
+	GameModuleNotRegistered,
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleManagerGetGameModulesError {
+	MutexLocked,
+	MutexPoisoned,
+}
+
+#[derive(Debug, Clone)]
+pub enum GameModuleManagerDeleteGameModuleError {
+	GameModuleDoesNotExist,
+}
+
+pub struct GameModuleManager {
+	registered_game_module_handles: HashMap<GameModuleID, GameModuleHandle>,
+	new_game_module_id: GameModuleID,
+	recycled_game_ids: Vec<GameModuleID>,
+}
+
+impl GameModuleManager {
+	fn new() -> GameModuleManager {
+		GameModuleManager {
+			registered_game_module_handles: HashMap::new(),
+			new_game_module_id: 1,
+			recycled_game_ids: Vec::new(),
+		}
+	}
+
+	pub(in crate) fn register_game_module_handle(&mut self, wait_for_lock: bool, game_module_handle: GameModuleHandle) -> Result<(), GameModuleManagerRegisterGameModuleHandleError> {
+		let mut game_module = game_module_handle.clone();
+		let game_module = match game_module.access(wait_for_lock) {
+			Ok(game_module) => game_module,
+			Err(err) => {
+				match err {
+					GameModuleHandleAccessError::Locked => return Err(GameModuleManagerRegisterGameModuleHandleError::GameModuleAlreadyRegistered),
+					GameModuleHandleAccessError::Poisoned => return Err(GameModuleManagerRegisterGameModuleHandleError::GameModuleAlreadyRegistered),
+				}
+			},
+		
+		};
+
+		let game_module_info = game_module.get_game_module_info();
+		let game_module_id = game_module_info.get_game_module_id();
+
+		if self.registered_game_module_handles.contains_key(&game_module_id) {
+			return Err(GameModuleManagerRegisterGameModuleHandleError::GameModuleAlreadyRegistered);
+		}
+
+		self.registered_game_module_handles.insert(game_module_id, game_module_handle);
+
+		Ok(())
+	}
+
+	pub(in crate) fn unregister_game_module_handle(&mut self, game_module_id: GameModuleID) -> Result<(), GameModuleManagerUnregisterGameModuleHandleError> {
+		if let Some(_) = self.registered_game_module_handles.remove(&game_module_id) {
+			self.recycle_used_game_module_id(game_module_id);
+			Ok(())
+		} else {
+			Err(GameModuleManagerUnregisterGameModuleHandleError::GameModuleNotRegistered)
+		}
+	}
+	
+	fn get_unused_game_module_id(&mut self) -> GameModuleID {
+		if let Some(game_module_id) = self.recycled_game_ids.pop() {
+			game_module_id
+		} else {
+			let game_module_id = self.new_game_module_id;
+			self.new_game_module_id += 1;
+			game_module_id
+		}
+	}
+
+	fn recycle_used_game_module_id(&mut self, game_module_id: GameModuleID) {
+		self.recycled_game_ids.push(game_module_id);
+	}
+
+	pub fn get_game_modules(&self) -> Result<Vec<GameModuleInfo>, GameModuleManagerGetGameModulesError> {
+		let game_module_handles = self.registered_game_module_handles.values().into_iter();
+		let mut game_module_infos: Vec<GameModuleInfo> = Vec::new();
+
+		for game_module_handle in game_module_handles {
+			let mut game_module = game_module_handle.clone();
+
+			let game_module = match game_module.access(true) {
+				Ok(game_module) => game_module,
+				Err(_) => return Err(GameModuleManagerGetGameModulesError::MutexLocked),
+			};
+
+			game_module_infos.push(game_module.get_game_module_info().clone());
+		}
+
+		Ok(game_module_infos)
+	}
+
+	pub fn get_game_module_handle(&self, game_module_id: GameModuleID) -> Option<GameModuleHandle> {
+		self.registered_game_module_handles.get(&game_module_id).cloned()
+	}
+
+	pub fn create_game_module<T: 'static + GameModuleType>(&mut self) -> GameModuleHandle {
+		let game_module = GameModule::new::<T>();
+
+		let game_module_handle = GameModuleHandle::new(game_module);
+
+		match self.register_game_module_handle(true, game_module_handle.clone()) {
+			Ok(_) => game_module_handle,
+			Err(err) => panic!("Failed to register game module handle: {:?}", err),
+		}
+	}
+
+	pub fn delete_game_module(&mut self, game_module_id: GameModuleID) -> Result<(), GameModuleManagerDeleteGameModuleError> {
+		if let Some(_) = self.registered_game_module_handles.remove(&game_module_id) {
+			self.recycle_used_game_module_id(game_module_id);
+			Ok(())
+		} else {
+			Err(GameModuleManagerDeleteGameModuleError::GameModuleDoesNotExist)
 		}
 	}
 }
@@ -619,7 +913,7 @@ impl GameManager {
 		}
 	}
 
-	fn register_game_handle(&mut self, wait_for_lock: bool, game_handle: GameHandle) -> Result<(), GameManagerRegisterGameHandleError> {
+	pub(in crate) fn register_game_handle(&mut self, wait_for_lock: bool, game_handle: GameHandle) -> Result<(), GameManagerRegisterGameHandleError> {
 		let mut game = game_handle.clone();
 
 		let game = match game.access(wait_for_lock) {
@@ -646,21 +940,13 @@ impl GameManager {
 		Ok(())
 	}
 
-	fn unregister_game_handle(&mut self, game_id: GameID) -> Result<(), GameManagerUnregisterGameHandleError> {
+	pub(in crate) fn unregister_game_handle(&mut self, game_id: GameID) -> Result<(), GameManagerUnregisterGameHandleError> {
 		if let Some(_) = self.registered_game_handles.remove(&game_id) {
 			self.recycle_used_game_id(game_id);
 			Ok(())
 		} else {
 			Err(GameManagerUnregisterGameHandleError::GameNotRegistered)
 		}
-	}
-
-	pub fn get_registered_game_handles(&self) -> &HashMap<GameID, GameHandle> {
-		&self.registered_game_handles
-	}
-
-	pub fn get_game_handle(&self, game_id: GameID) -> Option<GameHandle> {
-		self.registered_game_handles.get(&game_id).cloned()
 	}
 
 	fn get_unused_game_id(&mut self) -> GameID {
@@ -703,6 +989,10 @@ impl GameManager {
 		}
 
 		Ok(game_infos)
+	}
+	
+	pub fn get_game_handle(&self, game_id: GameID) -> Option<GameHandle> {
+		self.registered_game_handles.get(&game_id).cloned()
 	}
 
 	pub fn create_game(&mut self, game_name: String) -> GameHandle {
