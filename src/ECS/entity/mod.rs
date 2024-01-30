@@ -6,7 +6,7 @@ use bevy::ecs::entity::Entity as BevyEntity;
 #[derive(Send + Sync + Serialize + Deserialize<'static>, Default + Debug + Clone)]
 pub struct Entity {
     bevy_entity: BevyEntity,
-    registered_components: Vec<Box<dyn Component>>,
+    components: Vec<Box<dyn Component>>,
 }
 
 impl Entity {
@@ -21,10 +21,10 @@ impl Entity {
     }
 
     pub fn register_component(&mut self, component: Box<dyn Component>) {
-        self.registered_components.push(component);
+        self.components.push(component);
     }
 
     pub fn unregister_component(&mut self, component: Box<dyn Component>) {
-        self.registered_components.remove(component);
+        self.components.remove(component);
     }
 }
