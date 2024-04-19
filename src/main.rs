@@ -1,29 +1,43 @@
-pub mod game;
+use tokio::task;
+use tokio::time::{sleep, Duration};
 
-use game::*;
+#[tokio::main]
+async fn main() {
+    // Spawn some CPU-bound tasks using `spawn_blocking`
+    for _ in 0..30 {
+        task::spawn_blocking(|| {
+            // Simulate a CPU-intensive task
+            heavy_computation();
+        });
+    }
 
-use log::*;
+    // And handle many I/O-bound tasks
+    for _ in 0..100 {
+        tokio::spawn(async {
+            // Simulate an I/O-bound task (e.g., network call)
+            io_bound_operation().await;
+        });
+    }
 
-fn main() {
-    let game_manager = GAME_MANAGER.clone();
-    let mut game_manager = match game_manager.lock() {
-        Ok(game_manager) => game_manager,
-        Err(_) => panic!("Failed to lock game manager!"),
-    };
+    sleep(Duration::from_secs(10)).await; // Wait for a while to let tasks progress
+}
 
-    let mut game = game_manager.create_game("your_mom".to_string());
-    let game = match game.access(true) {
-        Ok(game) => game,
-        Err(_) => panic!("Failed to lock game!"),
-    };
+fn heavy_computation() {
+    let mut sum = 0i32;
+    for i in 0..1_000_000 {
+        sum = match sum.checked_add(i) {
+            Some(value) => value,
+            None => {
+                println!("Overflow!");
+                return;
+            }
+        };
+    }
+    println!("Sum is {}", sum);
+}
 
-    // continue implementing example here
-    // do extensive testing
-    // insert lot's of error/warn/info/debug/trace messages
-    // add checks to prevent a module being edited while it is currently being used
-
-
-
-
-    // change gameconfig and gamestate to use the new module system
+async fn io_bound_operation() {
+    // Simulate an I/O-bound task with a delay
+    sleep(Duration::from_secs(1)).await;
+    println!("I/O task completed");
 }
