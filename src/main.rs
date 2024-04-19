@@ -32,6 +32,13 @@ fn heavy_computation() {
                 return;
             }
         };
+        sum = match sum.checked_sub(i) {
+            Some(value) => value,
+            None => {
+                println!("Underflow!");
+                return;
+            }
+        };
     }
     println!("Sum is {}", sum);
 }
